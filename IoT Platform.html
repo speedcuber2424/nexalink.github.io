@@ -1,0 +1,1330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>NexaLink — IoT Platform</title>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+<!-- MQTT.js for real hardware communication -->
+<script src="https://unpkg.com/mqtt@4.3.7/dist/mqtt.min.js"></script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script type="text/babel" src="tweaks-panel.jsx"></script>
+<script type="application/json" id="__tweak_defaults">{"accent":"#3B82F6","radius":14,"darkMode":false}</script>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  html,body,#root{height:100%}
+  body{font-family:'Plus Jakarta Sans',sans-serif}
+  ::-webkit-scrollbar{width:5px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:rgba(0,0,0,0.15);border-radius:10px}
+  input[type=range]{-webkit-appearance:none;appearance:none;background:transparent;cursor:pointer}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;border-radius:50%;background:var(--accent,#3B82F6);margin-top:-5px;cursor:pointer}
+  input[type=range]::-webkit-slider-runnable-track{height:5px;border-radius:10px;background:rgba(120,120,140,0.2)}
+  @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+  @keyframes slideUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.35}}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  @keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+// ── THEME ──────────────────────────────────────────────────────────────────────
+const makeTheme = (dark, accent, radius) => ({
+  dark, accent, radius,
+  bg:        dark ? '#0f0f11' : '#f8f7f5',
+  surface:   dark ? '#1a1a1f' : '#ffffff',
+  surface2:  dark ? '#222228' : '#f1f0ee',
+  surface3:  dark ? '#2a2a32' : '#e8e6e3',
+  border:    dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)',
+  text:      dark ? '#f0eff0' : '#18181b',
+  textSub:   dark ? '#888894' : '#71717a',
+  textMuted: dark ? '#555560' : '#a1a1aa',
+  shadow:    dark ? '0 1px 3px rgba(0,0,0,0.5),0 8px 28px rgba(0,0,0,0.35)' : '0 1px 3px rgba(0,0,0,0.06),0 8px 28px rgba(0,0,0,0.09)',
+  shadowSm:  dark ? '0 1px 2px rgba(0,0,0,0.4)' : '0 1px 2px rgba(0,0,0,0.06)',
+  green: '#22c55e', red: '#ef4444', amber: '#f59e0b',
+});
+
+// ── MOCK DEVICES ───────────────────────────────────────────────────────────────
+const INITIAL_DEVICES = [
+  { id:'d1', name:'ESP32 Robot', type:'ESP32', status:'online', lastSeen:'Just now', sharedWith:[], permission:'owner', firmware:'v2.3.1', temp:24.2, humidity:58, brightness:70, relay:true },
+  { id:'d2', name:'HC-05 Arm', type:'HC-05', status:'online', lastSeen:'1 min ago', sharedWith:[], permission:'owner', firmware:'v1.0.4', temp:null, humidity:null, brightness:45, relay:false },
+  { id:'d3', name:'ESP32 Rooftop', type:'ESP32', status:'offline', lastSeen:'3h ago', sharedWith:['bob@co.com'], permission:'owner', firmware:'v2.3.1', temp:31.5, humidity:72, brightness:100, relay:true },
+  { id:'d4', name:'ESP32 Workshop', type:'ESP32', status:'online', lastSeen:'Just now', sharedWith:[], permission:'viewer', firmware:'v2.2.0', temp:19.8, humidity:44, brightness:30, relay:false },
+];
+
+const DEFAULT_ROBOT_CMDS = [
+  { id:'c1', label:'FORWARD',  value:'F', color:'#3B82F6', key:'ArrowUp' },
+  { id:'c2', label:'BACKWARD', value:'B', color:'#3B82F6', key:'ArrowDown' },
+  { id:'c3', label:'LEFT',     value:'L', color:'#8B5CF6', key:'ArrowLeft' },
+  { id:'c4', label:'RIGHT',    value:'R', color:'#8B5CF6', key:'ArrowRight' },
+  { id:'c5', label:'STOP',     value:'S', color:'#ef4444', key:'Space' },
+];
+
+const DEFAULT_CONN = {
+  broker: 'broker.hivemq.com',
+  port: '8884',
+  useSSL: true,
+  topic: 'nexalink/device/robot',
+  clientId: 'nexalink_' + Math.random().toString(36).slice(2,9),
+  username: '',
+  password: '',
+};
+
+// ── ICON ────────────────────────────────────────────────────────────────────
+const Icon = ({ name, size=18, color='currentColor', style={} }) => {
+  const p = {
+    cpu:<><rect x="7" y="7" width="10" height="10" rx="1"/><path d="M12 7V5M12 19v-2M7 12H5M19 12h-2M9 7V5M15 7V5M9 19v-2M15 19v-2M7 9H5M7 15H5M19 9h-2M19 15h-2"/></>,
+    wifi:<><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1" fill="currentColor"/></>,
+    bluetooth:<><polyline points="6.5 6.5 17.5 17.5 12 23 12 1 17.5 6.5 6.5 17.5"/></>,
+    sun:<><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></>,
+    moon:<><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></>,
+    plus:<><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></>,
+    chevronRight:<><polyline points="9 18 15 12 9 6"/></>,
+    chevronLeft:<><polyline points="15 18 9 12 15 6"/></>,
+    eye:<><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></>,
+    eyeOff:<><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></>,
+    settings:<><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></>,
+    bell:<><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></>,
+    users:<><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></>,
+    activity:<><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></>,
+    thermometer:<><path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/></>,
+    droplets:<><path d="M7 16.3c0 2.15 1.57 3.7 3.5 3.7s3.5-1.55 3.5-3.7c0-2.2-2-4.6-3.5-6.3C9 11.7 7 14.1 7 16.3z"/><path d="M10.5 7.3c0 1.43 1.05 2.47 2.33 2.47S15.17 8.73 15.17 7.3c0-1.47-1.34-3.07-2.34-4.2C11.84 4.23 10.5 5.83 10.5 7.3z"/></>,
+    zap:<><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></>,
+    send:<><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></>,
+    x:<><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></>,
+    check:<><polyline points="20 6 9 17 4 12"/></>,
+    share:<><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></>,
+    log:<><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></>,
+    link:<><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></>,
+    edit:<><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></>,
+    trash:<><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></>,
+    robot:<><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M12 11V7"/><circle cx="12" cy="5" r="2"/><path d="M7 15h.01M17 15h.01"/><path d="M7 19h10"/></>,
+    plug:<><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8H6l1 5a5 5 0 0 0 10 0l1-5z"/></>,
+    key:<><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></>,
+  };
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color}
+      strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" style={style}>
+      {p[name] || null}
+    </svg>
+  );
+};
+
+// ── HELPERS ────────────────────────────────────────────────────────────────────
+const StatusDot = ({ status, size=8 }) => (
+  <span style={{
+    display:'inline-block', width:size, height:size, borderRadius:'50%', flexShrink:0,
+    background: status==='online'?'#22c55e': status==='connecting'?'#f59e0b':'#71717a',
+    boxShadow: status==='online'?'0 0 0 3px rgba(34,197,94,0.2)': status==='connecting'?'0 0 0 3px rgba(245,158,11,0.2)':'none',
+    animation: (status==='online'||status==='connecting') ? 'pulse 2s infinite' : 'none',
+  }}/>
+);
+
+const Toggle = ({ checked, onChange, accent, disabled=false }) => (
+  <button onClick={()=>!disabled&&onChange(!checked)} style={{
+    width:44, height:26, borderRadius:13, border:'none',
+    cursor:disabled?'not-allowed':'pointer',
+    background: checked ? accent : 'rgba(120,120,140,0.25)',
+    position:'relative', transition:'background 0.25s', padding:0, flexShrink:0,
+    opacity:disabled?0.45:1
+  }}>
+    <span style={{
+      position:'absolute', top:3, left:checked?21:3,
+      width:20, height:20, borderRadius:'50%', background:'#fff',
+      boxShadow:'0 1px 3px rgba(0,0,0,0.25)', transition:'left 0.25s'
+    }}/>
+  </button>
+);
+
+const MiniChart = ({ data, color, height=55, label }) => {
+  if (!data||data.length<2) return null;
+  const vals = data.map(d=>d.v);
+  const min=Math.min(...vals), max=Math.max(...vals), range=max-min||1;
+  const w=280, h=height;
+  const pts = data.map((d,i)=>{
+    const x=(i/(data.length-1))*w;
+    const y=h-((d.v-min)/range)*(h-10)-5;
+    return `${x},${y}`;
+  });
+  return (
+    <svg width="100%" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" style={{display:'block'}}>
+      <defs>
+        <linearGradient id={`g${label}`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.25"/>
+          <stop offset="100%" stopColor={color} stopOpacity="0"/>
+        </linearGradient>
+      </defs>
+      <path d={`M${pts[0]} L${pts.join(' L')} L${w},${h} L0,${h} Z`} fill={`url(#g${label})`}/>
+      <path d={`M${pts.join(' L')}`} fill="none" stroke={color} strokeWidth="1.5"/>
+    </svg>
+  );
+};
+
+const genChart = (base, noise, n=20) => Array.from({length:n},(_,i)=>{
+  const t=new Date(Date.now()-(n-1-i)*30000);
+  return { t:`${t.getHours()}:${String(t.getMinutes()).padStart(2,'0')}`, v:+(base+(Math.random()-0.5)*noise*2).toFixed(1) };
+});
+
+// ── useMQTT HOOK ───────────────────────────────────────────────────────────────
+const useMQTT = () => {
+  const [connState, setConnState] = useState('disconnected'); // disconnected|connecting|connected|error
+  const [lastError, setLastError] = useState('');
+  const [messages, setMessages] = useState([]);
+  const clientRef = useRef(null);
+
+  const addMsg = useCallback((msg) => {
+    setMessages(p => [...p.slice(-99), { ...msg, time: new Date().toTimeString().slice(0,8) }]);
+  }, []);
+
+  const connect = useCallback((cfg) => {
+    if (clientRef.current) {
+      try { clientRef.current.end(true); } catch(e){}
+      clientRef.current = null;
+    }
+    setConnState('connecting');
+    setLastError('');
+    addMsg({ type:'info', text:`Connecting to ${cfg.broker}:${cfg.port}…` });
+
+    const protocol = cfg.useSSL ? 'wss' : 'ws';
+    const url = `${protocol}://${cfg.broker}:${cfg.port}/mqtt`;
+
+    const opts = {
+      clientId: cfg.clientId || 'nexalink_' + Math.random().toString(36).slice(2,9),
+      clean: true,
+      connectTimeout: 8000,
+      reconnectPeriod: 0,
+    };
+    if (cfg.username) opts.username = cfg.username;
+    if (cfg.password) opts.password = cfg.password;
+
+    let client;
+    try {
+      client = mqtt.connect(url, opts);
+    } catch(e) {
+      setConnState('error');
+      setLastError(String(e));
+      addMsg({ type:'error', text:`Failed: ${e}` });
+      return;
+    }
+
+    client.on('connect', () => {
+      setConnState('connected');
+      addMsg({ type:'success', text:`Connected ✓ (${cfg.clientId})` });
+      if (cfg.topic) client.subscribe(cfg.topic + '/#', ()=>{});
+    });
+    client.on('message', (topic, payload) => {
+      addMsg({ type:'rx', text:`← [${topic}] ${payload.toString()}` });
+    });
+    client.on('error', (err) => {
+      setConnState('error');
+      setLastError(String(err));
+      addMsg({ type:'error', text:`Error: ${err.message||err}` });
+    });
+    client.on('close', () => {
+      setConnState('disconnected');
+      addMsg({ type:'info', text:'Disconnected.' });
+    });
+
+    clientRef.current = client;
+  }, [addMsg]);
+
+  const disconnect = useCallback(() => {
+    if (clientRef.current) {
+      clientRef.current.end();
+      clientRef.current = null;
+    }
+    setConnState('disconnected');
+  }, []);
+
+  const publish = useCallback((topic, payload) => {
+    if (!clientRef.current || connState !== 'connected') return false;
+    clientRef.current.publish(topic, String(payload));
+    addMsg({ type:'tx', text:`→ [${topic}] ${payload}` });
+    return true;
+  }, [connState, addMsg]);
+
+  useEffect(() => () => { if(clientRef.current) clientRef.current.end(true); }, []);
+
+  return { connState, lastError, messages, connect, disconnect, publish, addMsg };
+};
+
+// ── CONNECTION PANEL ───────────────────────────────────────────────────────────
+const ConnectionPanel = ({ theme:t, mqtt: mq, conn, setConn }) => {
+  const [showPass, setShowPass] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const connected = mq.connState === 'connected';
+  const connecting = mq.connState === 'connecting';
+
+  const statusColor = {
+    connected: t.green, connecting: t.amber,
+    error: t.red, disconnected: t.textMuted
+  }[mq.connState];
+
+  const statusLabel = {
+    connected:'Connected', connecting:'Connecting…',
+    error:'Error', disconnected:'Disconnected'
+  }[mq.connState];
+
+  const inp = (val, key, placeholder, type='text') => ({
+    value: val,
+    onChange: e => setConn(p=>({...p,[key]:e.target.value})),
+    placeholder,
+    type,
+    style:{
+      flex:1, padding:'8px 12px', borderRadius:t.radius-4,
+      border:`1.5px solid ${t.border}`, background:t.surface2,
+      color:t.text, fontSize:13, fontFamily:'Plus Jakarta Sans,sans-serif', outline:'none',
+      width:'100%'
+    }
+  });
+
+  return (
+    <div style={{
+      background:t.surface, borderRadius:t.radius, border:`1px solid ${t.border}`,
+      boxShadow:t.shadowSm, marginBottom:18, overflow:'hidden'
+    }}>
+      {/* Header row */}
+      <div style={{
+        display:'flex', alignItems:'center', gap:12, padding:'14px 18px',
+        cursor:'pointer', userSelect:'none'
+      }} onClick={()=>setExpanded(p=>!p)}>
+        <div style={{
+          width:36, height:36, borderRadius:10, flexShrink:0,
+          background: connected ? `${t.green}18` : `${t.accent}15`,
+          display:'flex', alignItems:'center', justifyContent:'center'
+        }}>
+          <Icon name="plug" size={16} color={connected ? t.green : t.accent}/>
+        </div>
+        <div style={{flex:1}}>
+          <div style={{fontSize:13, fontWeight:700, color:t.text}}>MQTT Broker</div>
+          <div style={{fontSize:12, color:t.textMuted, fontFamily:'monospace'}}>
+            {conn.useSSL?'wss':'ws'}://{conn.broker}:{conn.port}
+          </div>
+        </div>
+        <div style={{display:'flex', alignItems:'center', gap:8}}>
+          <StatusDot status={mq.connState} size={8}/>
+          <span style={{fontSize:12, fontWeight:600, color:statusColor}}>{statusLabel}</span>
+          {mq.connState==='error' && (
+            <span style={{fontSize:11,color:t.red,maxWidth:160,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+              {mq.lastError.slice(0,40)}
+            </span>
+          )}
+        </div>
+        <Icon name={expanded?'chevronLeft':'chevronRight'} size={16} color={t.textMuted}
+          style={{transform: expanded?'rotate(-90deg)':'rotate(90deg)', transition:'transform 0.2s'}}/>
+      </div>
+
+      {/* Settings form */}
+      {expanded && (
+        <div style={{padding:'0 18px 18px', borderTop:`1px solid ${t.border}`, paddingTop:16, display:'flex', flexDirection:'column', gap:12}}>
+          <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:10}}>
+            <div>
+              <label style={{fontSize:11,fontWeight:600,color:t.textSub,display:'block',marginBottom:5}}>BROKER HOST</label>
+              <input {...inp(conn.broker,'broker','broker.hivemq.com')}/>
+            </div>
+            <div>
+              <label style={{fontSize:11,fontWeight:600,color:t.textSub,display:'block',marginBottom:5}}>PORT</label>
+              <input {...inp(conn.port,'port','8884')} style={{...inp(conn.port,'port','8884').style}}/>
+            </div>
+          </div>
+          <div>
+            <label style={{fontSize:11,fontWeight:600,color:t.textSub,display:'block',marginBottom:5}}>BASE TOPIC</label>
+            <input {...inp(conn.topic,'topic','nexalink/device/robot')}/>
+          </div>
+          <div>
+            <label style={{fontSize:11,fontWeight:600,color:t.textSub,display:'block',marginBottom:5}}>CLIENT ID</label>
+            <input {...inp(conn.clientId,'clientId','nexalink_xxx')}/>
+          </div>
+          <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:10}}>
+            <div>
+              <label style={{fontSize:11,fontWeight:600,color:t.textSub,display:'block',marginBottom:5}}>USERNAME (optional)</label>
+              <input {...inp(conn.username,'username','user')}/>
+            </div>
+            <div>
+              <label style={{fontSize:11,fontWeight:600,color:t.textSub,display:'block',marginBottom:5}}>PASSWORD (optional)</label>
+              <div style={{position:'relative'}}>
+                <input {...inp(conn.password,'password','••••••','text')} type={showPass?'text':'password'}/>
+                <button onClick={()=>setShowPass(p=>!p)} style={{
+                  position:'absolute',right:8,top:'50%',transform:'translateY(-50%)',
+                  background:'none',border:'none',cursor:'pointer',color:t.textMuted,padding:0
+                }}><Icon name={showPass?'eyeOff':'eye'} size={14}/></button>
+              </div>
+            </div>
+          </div>
+          <div style={{display:'flex',alignItems:'center',gap:10}}>
+            <Toggle checked={conn.useSSL} onChange={v=>setConn(p=>({...p,useSSL:v}))} accent={t.accent}/>
+            <span style={{fontSize:13,color:t.textSub}}>Use WSS (TLS/SSL) — recommended for public brokers</span>
+          </div>
+          <div style={{display:'flex',gap:8,marginTop:4}}>
+            {!connected ? (
+              <button onClick={()=>mq.connect(conn)} disabled={connecting} style={{
+                flex:1, padding:'10px 0', borderRadius:t.radius-2, border:'none',
+                background:t.accent, color:'#fff', fontWeight:700, fontSize:14,
+                cursor:connecting?'wait':'pointer', fontFamily:'Plus Jakarta Sans,sans-serif',
+                boxShadow:`0 4px 14px ${t.accent}40`, opacity:connecting?0.7:1
+              }}>
+                {connecting ? 'Connecting…' : 'Connect'}
+              </button>
+            ) : (
+              <button onClick={mq.disconnect} style={{
+                flex:1, padding:'10px 0', borderRadius:t.radius-2, border:`1px solid ${t.border}`,
+                background:'none', color:t.red, fontWeight:600, fontSize:14,
+                cursor:'pointer', fontFamily:'Plus Jakarta Sans,sans-serif'
+              }}>Disconnect</button>
+            )}
+          </div>
+
+          {/* Quick broker presets */}
+          <div>
+            <div style={{fontSize:11,fontWeight:600,color:t.textMuted,marginBottom:8}}>QUICK PRESETS</div>
+            <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+              {[
+                {label:'HiveMQ Public', broker:'broker.hivemq.com', port:'8884', useSSL:true},
+                {label:'Mosquitto Test', broker:'test.mosquitto.org', port:'8081', useSSL:true},
+                {label:'EMQX Public', broker:'broker.emqx.io', port:'8084', useSSL:true},
+              ].map(p=>(
+                <button key={p.label} onClick={()=>setConn(prev=>({...prev,...p}))} style={{
+                  padding:'5px 12px', borderRadius:20, border:`1px solid ${t.border}`,
+                  background:t.surface2, color:t.textSub, fontSize:11, fontWeight:600,
+                  cursor:'pointer', fontFamily:'Plus Jakarta Sans,sans-serif'
+                }}>{p.label}</button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ── ROBOT CONTROL PANEL ────────────────────────────────────────────────────────
+const RobotControlPanel = ({ theme:t, mqtt:mq, conn, cmds, setCmds }) => {
+  const [editMode, setEditMode] = useState(false);
+  const [editCmd, setEditCmd] = useState(null); // { id, label, value, color }
+  const [lastSent, setLastSent] = useState(null);
+  const [pressedKey, setPressedKey] = useState(null);
+  const connected = mq.connState === 'connected';
+
+  const sendCmd = useCallback((cmd) => {
+    const topic = conn.topic + '/control';
+    const ok = mq.publish(topic, cmd.value);
+    if (ok || true) {
+      setLastSent(cmd.id);
+      setTimeout(() => setLastSent(null), 300);
+    }
+  }, [mq, conn]);
+
+  // Keyboard support
+  useEffect(() => {
+    const down = (e) => {
+      const keyName = e.code === 'Space' ? 'Space' : e.key.replace('Arrow','Arrow');
+      const cmd = cmds.find(c => c.key === keyName || c.key === e.code || c.key === e.key);
+      if (cmd) {
+        e.preventDefault();
+        setPressedKey(cmd.id);
+        sendCmd(cmd);
+      }
+    };
+    const up = () => setPressedKey(null);
+    window.addEventListener('keydown', down);
+    window.addEventListener('keyup', up);
+    return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); };
+  }, [cmds, sendCmd]);
+
+  // D-pad layout: arrange by key
+  const dpadMap = { ArrowUp:'top', ArrowDown:'bottom', ArrowLeft:'left', ArrowRight:'right', Space:'center' };
+  const isDpad = cmds.some(c=>c.key==='ArrowUp');
+
+  const addCmd = () => {
+    const newCmd = { id:'c'+Date.now(), label:'CMD', value:'X', color:t.accent, key:'' };
+    setCmds(p=>[...p, newCmd]);
+    setEditCmd(newCmd);
+  };
+
+  const removeCmd = (id) => setCmds(p=>p.filter(c=>c.id!==id));
+  const saveEdit = (updated) => {
+    setCmds(p=>p.map(c=>c.id===updated.id?updated:c));
+    setEditCmd(null);
+  };
+
+  const CmdButton = ({ cmd, style={} }) => {
+    const active = pressedKey===cmd.id || lastSent===cmd.id;
+    return (
+      <div style={{position:'relative', ...style}}>
+        <button
+          onPointerDown={()=>sendCmd(cmd)}
+          style={{
+            width:'100%', height:'100%', borderRadius:t.radius,
+            border:`2px solid ${active ? cmd.color : t.border}`,
+            background: active ? `${cmd.color}22` : t.surface2,
+            color:t.text, cursor:connected?'pointer':'not-allowed',
+            display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center',
+            gap:4, padding:'10px 8px', transition:'all 0.1s',
+            boxShadow: active ? `0 0 0 4px ${cmd.color}30` : t.shadowSm,
+            transform: active ? 'scale(0.96)' : 'scale(1)',
+            opacity: connected ? 1 : 0.4,
+            fontFamily:'Plus Jakarta Sans,sans-serif', userSelect:'none',
+            minWidth:70, minHeight:60
+          }}
+        >
+          <span style={{fontSize:11,fontWeight:700,color:t.textSub,letterSpacing:'0.05em'}}>{cmd.label}</span>
+          <span style={{
+            fontSize:18,fontWeight:800,color:active?cmd.color:t.text,
+            fontFamily:'monospace', lineHeight:1
+          }}>{cmd.value}</span>
+          {cmd.key && <span style={{fontSize:9,color:t.textMuted,marginTop:2}}>{cmd.key.replace('Arrow','↑'.replace('Up','↑').replace('Down','↓').replace('Left','←').replace('Right','→'))}</span>}
+        </button>
+        {editMode && (
+          <button onClick={()=>setEditCmd({...cmd})} style={{
+            position:'absolute',top:-6,right:-6,width:20,height:20,borderRadius:'50%',
+            background:t.accent,border:'none',cursor:'pointer',padding:0,
+            display:'flex',alignItems:'center',justifyContent:'center',
+            boxShadow:'0 2px 6px rgba(0,0,0,0.2)'
+          }}><Icon name="edit" size={10} color="#fff"/></button>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div style={{background:t.surface,borderRadius:t.radius,padding:22,border:`1px solid ${t.border}`,boxShadow:t.shadowSm}}>
+      {/* Header */}
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:18}}>
+        <div style={{display:'flex',alignItems:'center',gap:10}}>
+          <div style={{width:32,height:32,borderRadius:10,background:`${t.accent}15`,display:'flex',alignItems:'center',justifyContent:'center'}}>
+            <Icon name="robot" size={16} color={t.accent}/>
+          </div>
+          <div>
+            <div style={{fontSize:13,fontWeight:700,color:t.text}}>Robot Commands</div>
+            <div style={{fontSize:11,color:t.textMuted}}>
+              {connected ? `→ ${conn.topic}/control` : 'Connect MQTT to send'}
+            </div>
+          </div>
+        </div>
+        <div style={{display:'flex',gap:6}}>
+          <button onClick={()=>setEditMode(p=>!p)} style={{
+            padding:'6px 12px', borderRadius:t.radius-4, border:`1px solid ${editMode?t.accent:t.border}`,
+            background: editMode?`${t.accent}15`:t.surface2, color:editMode?t.accent:t.textSub,
+            fontSize:11,fontWeight:600,cursor:'pointer',fontFamily:'Plus Jakarta Sans,sans-serif',
+            display:'flex',alignItems:'center',gap:5
+          }}>
+            <Icon name="edit" size={12} color={editMode?t.accent:t.textSub}/>
+            {editMode ? 'Done' : 'Edit'}
+          </button>
+          {editMode && (
+            <button onClick={addCmd} style={{
+              padding:'6px 12px',borderRadius:t.radius-4,border:`1px solid ${t.border}`,
+              background:t.surface2,color:t.textSub,fontSize:11,fontWeight:600,
+              cursor:'pointer',fontFamily:'Plus Jakarta Sans,sans-serif',
+              display:'flex',alignItems:'center',gap:5
+            }}>
+              <Icon name="plus" size={12}/>Add
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* D-Pad layout */}
+      <div style={{
+        display:'grid',
+        gridTemplateColumns:'repeat(3,72px)',
+        gridTemplateRows:'repeat(3,60px)',
+        gap:8, justifyContent:'center', margin:'0 auto 14px'
+      }}>
+        {/* Row 1 */}
+        <div/>
+        {cmds.find(c=>c.key==='ArrowUp') && <CmdButton cmd={cmds.find(c=>c.key==='ArrowUp')}/>}
+        <div/>
+        {/* Row 2 */}
+        {cmds.find(c=>c.key==='ArrowLeft') && <CmdButton cmd={cmds.find(c=>c.key==='ArrowLeft')}/>}
+        {cmds.find(c=>c.key==='Space') && <CmdButton cmd={cmds.find(c=>c.key==='Space')}/>}
+        {cmds.find(c=>c.key==='ArrowRight') && <CmdButton cmd={cmds.find(c=>c.key==='ArrowRight')}/>}
+        {/* Row 3 */}
+        <div/>
+        {cmds.find(c=>c.key==='ArrowDown') && <CmdButton cmd={cmds.find(c=>c.key==='ArrowDown')}/>}
+        <div/>
+      </div>
+
+      {/* Extra commands (no key or custom) */}
+      {cmds.filter(c=>!['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(c.key)).length > 0 && (
+        <div style={{display:'flex',flexWrap:'wrap',gap:8,justifyContent:'center',marginBottom:14}}>
+          {cmds.filter(c=>!['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(c.key)).map(cmd=>(
+            <div key={cmd.id} style={{position:'relative'}}>
+              <button onPointerDown={()=>sendCmd(cmd)} style={{
+                padding:'10px 18px', borderRadius:t.radius-4,
+                border:`2px solid ${lastSent===cmd.id?cmd.color:t.border}`,
+                background:lastSent===cmd.id?`${cmd.color}18`:t.surface2,
+                color:t.text,cursor:connected?'pointer':'not-allowed',
+                display:'flex',flexDirection:'column',alignItems:'center',gap:2,
+                transition:'all 0.1s', transform:lastSent===cmd.id?'scale(0.95)':'scale(1)',
+                opacity:connected?1:0.4, fontFamily:'Plus Jakarta Sans,sans-serif'
+              }}>
+                <span style={{fontSize:10,fontWeight:700,color:t.textSub,letterSpacing:'0.05em'}}>{cmd.label}</span>
+                <span style={{fontSize:16,fontWeight:800,color:lastSent===cmd.id?cmd.color:t.text,fontFamily:'monospace'}}>{cmd.value}</span>
+              </button>
+              {editMode && (
+                <button onClick={()=>setEditCmd({...cmd})} style={{
+                  position:'absolute',top:-6,right:-6,width:20,height:20,borderRadius:'50%',
+                  background:t.accent,border:'none',cursor:'pointer',padding:0,
+                  display:'flex',alignItems:'center',justifyContent:'center'
+                }}><Icon name="edit" size={10} color="#fff"/></button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Keyboard hint */}
+      <div style={{textAlign:'center',fontSize:11,color:t.textMuted}}>
+        Use arrow keys + spacebar · tap/click buttons · hold for continuous
+      </div>
+
+      {/* Edit modal */}
+      {editCmd && (
+        <CmdEditModal theme={t} cmd={editCmd} onSave={saveEdit}
+          onDelete={()=>{removeCmd(editCmd.id);setEditCmd(null);}}
+          onClose={()=>setEditCmd(null)}/>
+      )}
+    </div>
+  );
+};
+
+// ── COMMAND EDIT MODAL ─────────────────────────────────────────────────────────
+const CmdEditModal = ({ theme:t, cmd, onSave, onDelete, onClose }) => {
+  const [local, setLocal] = useState({...cmd});
+  const keyOptions = [
+    {label:'↑ Arrow Up', val:'ArrowUp'},
+    {label:'↓ Arrow Down', val:'ArrowDown'},
+    {label:'← Arrow Left', val:'ArrowLeft'},
+    {label:'→ Arrow Right', val:'ArrowRight'},
+    {label:'Space (center)', val:'Space'},
+    {label:'None / Custom', val:''},
+  ];
+
+  return (
+    <div onClick={onClose} style={{
+      position:'fixed',inset:0,background:'rgba(0,0,0,0.45)',
+      display:'flex',alignItems:'center',justifyContent:'center',zIndex:2000,backdropFilter:'blur(4px)'
+    }}>
+      <div onClick={e=>e.stopPropagation()} style={{
+        background:t.surface, borderRadius:t.radius+4, padding:28, width:360,
+        border:`1px solid ${t.border}`, boxShadow:t.shadow, animation:'slideUp 0.25s ease'
+      }}>
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20}}>
+          <div style={{fontSize:15,fontWeight:700,color:t.text}}>Edit Command</div>
+          <button onClick={onClose} style={{background:'none',border:'none',cursor:'pointer',color:t.textSub}}>
+            <Icon name="x" size={18}/>
+          </button>
+        </div>
+
+        <div style={{display:'flex',flexDirection:'column',gap:14}}>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+            <div>
+              <label style={{fontSize:11,fontWeight:600,color:t.textSub,display:'block',marginBottom:5}}>LABEL</label>
+              <input value={local.label} onChange={e=>setLocal(p=>({...p,label:e.target.value.toUpperCase()}))}
+                placeholder="FORWARD" maxLength={10}
+                style={{width:'100%',padding:'9px 12px',borderRadius:t.radius-4,border:`1.5px solid ${t.border}`,
+                  background:t.surface2,color:t.text,fontSize:13,fontFamily:'Plus Jakarta Sans,sans-serif',outline:'none'}}/>
+            </div>
+            <div>
+              <label style={{fontSize:11,fontWeight:600,color:t.textSub,display:'block',marginBottom:5}}>VALUE (sent)</label>
+              <input value={local.value} onChange={e=>setLocal(p=>({...p,value:e.target.value}))}
+                placeholder="F" maxLength={20}
+                style={{width:'100%',padding:'9px 12px',borderRadius:t.radius-4,border:`1.5px solid ${t.border}`,
+                  background:t.surface2,color:t.text,fontSize:13,fontFamily:'monospace',outline:'none'}}/>
+            </div>
+          </div>
+
+          <div>
+            <label style={{fontSize:11,fontWeight:600,color:t.textSub,display:'block',marginBottom:5}}>KEYBOARD KEY</label>
+            <select value={local.key} onChange={e=>setLocal(p=>({...p,key:e.target.value}))}
+              style={{width:'100%',padding:'9px 12px',borderRadius:t.radius-4,border:`1.5px solid ${t.border}`,
+                background:t.surface2,color:t.text,fontSize:13,fontFamily:'Plus Jakarta Sans,sans-serif',outline:'none'}}>
+              {keyOptions.map(o=><option key={o.val} value={o.val}>{o.label}</option>)}
+            </select>
+          </div>
+
+          <div>
+            <label style={{fontSize:11,fontWeight:600,color:t.textSub,display:'block',marginBottom:5}}>BUTTON COLOR</label>
+            <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+              {['#3B82F6','#8B5CF6','#22c55e','#ef4444','#f59e0b','#ec4899','#06b6d4','#64748b'].map(c=>(
+                <button key={c} onClick={()=>setLocal(p=>({...p,color:c}))} style={{
+                  width:28,height:28,borderRadius:'50%',background:c,border:`3px solid ${local.color===c?t.text:'transparent'}`,
+                  cursor:'pointer',transition:'border 0.15s'
+                }}/>
+              ))}
+            </div>
+          </div>
+
+          {/* Preview */}
+          <div style={{background:t.surface2,borderRadius:t.radius-2,padding:14,textAlign:'center'}}>
+            <div style={{fontSize:10,fontWeight:700,color:t.textMuted,marginBottom:8}}>PREVIEW</div>
+            <div style={{display:'inline-flex',flexDirection:'column',alignItems:'center',gap:3,
+              padding:'12px 20px',borderRadius:t.radius,border:`2px solid ${local.color}`,
+              background:`${local.color}12`}}>
+              <span style={{fontSize:10,fontWeight:700,color:t.textSub,letterSpacing:'0.05em'}}>{local.label||'LABEL'}</span>
+              <span style={{fontSize:20,fontWeight:800,color:local.color,fontFamily:'monospace'}}>{local.value||'V'}</span>
+            </div>
+          </div>
+
+          <div style={{display:'flex',gap:8}}>
+            <button onClick={onDelete} style={{
+              padding:'10px 0',flex:'0 0 44px',borderRadius:t.radius-2,border:`1px solid ${t.red}40`,
+              background:'none',color:t.red,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'
+            }}><Icon name="trash" size={15} color={t.red}/></button>
+            <button onClick={()=>onSave(local)} style={{
+              flex:1,padding:'10px 0',borderRadius:t.radius-2,border:'none',
+              background:t.accent,color:'#fff',fontWeight:700,fontSize:14,
+              cursor:'pointer',fontFamily:'Plus Jakarta Sans,sans-serif',
+              boxShadow:`0 4px 12px ${t.accent}40`
+            }}>Save Command</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ── MQTT LOG ───────────────────────────────────────────────────────────────────
+const MQTTLog = ({ theme:t, messages }) => {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
+  }, [messages]);
+
+  const color = { tx:t.accent, rx:t.green, info:t.textSub, success:t.green, error:t.red };
+
+  return (
+    <div style={{background:t.surface,borderRadius:t.radius,border:`1px solid ${t.border}`,boxShadow:t.shadowSm,overflow:'hidden'}}>
+      <div style={{padding:'14px 18px',borderBottom:`1px solid ${t.border}`,display:'flex',alignItems:'center',gap:8}}>
+        <Icon name="activity" size={13} color={t.textSub}/>
+        <span style={{fontSize:12,fontWeight:600,color:t.textSub}}>MQTT LOG</span>
+        <span style={{marginLeft:'auto',fontSize:11,color:t.textMuted}}>{messages.length} messages</span>
+      </div>
+      <div ref={ref} style={{height:160,overflowY:'auto',padding:14,background:t.surface2}}>
+        {messages.length===0 && (
+          <div style={{fontSize:12,color:t.textMuted,textAlign:'center',paddingTop:24,fontFamily:'monospace'}}>
+            No messages yet — connect to a broker to begin
+          </div>
+        )}
+        {messages.map((m,i)=>(
+          <div key={i} style={{display:'flex',gap:12,padding:'3px 0',animation:'fadeIn 0.2s ease'}}>
+            <span style={{fontSize:10,fontFamily:'monospace',color:t.textMuted,flexShrink:0,paddingTop:1}}>{m.time}</span>
+            <span style={{fontSize:11,fontFamily:'monospace',color:color[m.type]||t.textSub,wordBreak:'break-all'}}>{m.text}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+// ── AUTH ───────────────────────────────────────────────────────────────────────
+const AuthScreen = ({ theme:t, onLogin }) => {
+  const [mode,setMode]=useState('login');
+  const [email,setEmail]=useState('demo@nexalink.io');
+  const [pass,setPass]=useState('demo1234');
+  const [name,setName]=useState('');
+  const [showPass,setShowPass]=useState(false);
+  const [loading,setLoading]=useState(false);
+  const [error,setError]=useState('');
+
+  const inp = { style:{
+    width:'100%',padding:'11px 14px',borderRadius:t.radius-2,
+    border:`1.5px solid ${t.border}`,background:t.surface2,
+    color:t.text,fontSize:14,fontFamily:'Plus Jakarta Sans,sans-serif',outline:'none'
+  }};
+
+  const submit = e => {
+    e.preventDefault();
+    if(!email||!pass){setError('Please fill in all fields.');return;}
+    if(mode==='signup'&&!name){setError('Name is required.');return;}
+    setLoading(true);
+    setTimeout(()=>{setLoading(false);onLogin({name:name||'Demo User',email});},1000);
+  };
+
+  return (
+    <div style={{minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center',background:t.bg,padding:20}}>
+      <div style={{position:'fixed',top:-150,right:-150,width:500,height:500,borderRadius:'50%',
+        background:`radial-gradient(circle,${t.accent}18 0%,transparent 70%)`,pointerEvents:'none'}}/>
+      <div style={{width:'100%',maxWidth:400,animation:'slideUp 0.5s ease'}}>
+        <div style={{textAlign:'center',marginBottom:32}}>
+          <div style={{width:52,height:52,borderRadius:16,background:t.accent,display:'inline-flex',
+            alignItems:'center',justifyContent:'center',marginBottom:12,boxShadow:`0 8px 24px ${t.accent}40`}}>
+            <Icon name="link" size={24} color="#fff"/>
+          </div>
+          <div style={{fontSize:22,fontWeight:800,color:t.text,letterSpacing:'-0.5px'}}>NexaLink</div>
+          <div style={{fontSize:13,color:t.textSub,marginTop:3}}>IoT + Robot Control Platform</div>
+        </div>
+        <div style={{background:t.surface,borderRadius:t.radius+4,padding:32,border:`1px solid ${t.border}`,boxShadow:t.shadow}}>
+          <div style={{display:'flex',background:t.surface2,borderRadius:t.radius,padding:4,marginBottom:26}}>
+            {['login','signup'].map(m=>(
+              <button key={m} onClick={()=>setMode(m)} style={{
+                flex:1,padding:'8px 0',borderRadius:t.radius-2,border:'none',
+                background:mode===m?t.surface:'transparent',
+                color:mode===m?t.text:t.textSub,fontWeight:mode===m?600:400,fontSize:13,
+                cursor:'pointer',transition:'all 0.2s',fontFamily:'Plus Jakarta Sans,sans-serif',
+                boxShadow:mode===m?t.shadowSm:'none'
+              }}>{m==='login'?'Sign In':'Sign Up'}</button>
+            ))}
+          </div>
+          <form onSubmit={submit} style={{display:'flex',flexDirection:'column',gap:13}}>
+            {mode==='signup'&&(
+              <div>
+                <label style={{fontSize:12,fontWeight:600,color:t.textSub,display:'block',marginBottom:5}}>Full Name</label>
+                <input value={name} onChange={e=>setName(e.target.value)} placeholder="Jane Doe" {...inp}/>
+              </div>
+            )}
+            <div>
+              <label style={{fontSize:12,fontWeight:600,color:t.textSub,display:'block',marginBottom:5}}>Email</label>
+              <input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="you@example.com" {...inp}/>
+            </div>
+            <div>
+              <label style={{fontSize:12,fontWeight:600,color:t.textSub,display:'block',marginBottom:5}}>Password</label>
+              <div style={{position:'relative'}}>
+                <input type={showPass?'text':'password'} value={pass} onChange={e=>setPass(e.target.value)} placeholder="••••••••"
+                  style={{...inp.style,paddingRight:44}}/>
+                <button type="button" onClick={()=>setShowPass(p=>!p)} style={{
+                  position:'absolute',right:12,top:'50%',transform:'translateY(-50%)',
+                  background:'none',border:'none',cursor:'pointer',color:t.textSub,padding:0
+                }}><Icon name={showPass?'eyeOff':'eye'} size={16}/></button>
+              </div>
+            </div>
+            {error&&<div style={{fontSize:13,color:t.red,background:`${t.red}15`,padding:'10px 14px',borderRadius:t.radius-4}}>{error}</div>}
+            <button type="submit" disabled={loading} style={{
+              width:'100%',padding:'12px 0',borderRadius:t.radius-2,border:'none',
+              background:t.accent,color:'#fff',fontWeight:700,fontSize:14,
+              cursor:loading?'wait':'pointer',marginTop:4,fontFamily:'Plus Jakarta Sans,sans-serif',
+              boxShadow:`0 4px 16px ${t.accent}40`,opacity:loading?0.8:1
+            }}>{loading?'Connecting…':(mode==='login'?'Sign In':'Create Account')}</button>
+          </form>
+          {mode==='login'&&(
+            <div style={{textAlign:'center',marginTop:18,fontSize:12,color:t.textMuted}}>
+              Demo: <strong style={{color:t.textSub}}>demo@nexalink.io</strong>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ── SIDEBAR ────────────────────────────────────────────────────────────────────
+const Sidebar = ({ theme:t, user, page, setPage, devices, onLogout, collapsed, setCollapsed }) => {
+  const onlineCount = devices.filter(d=>d.status==='online').length;
+  const nav = [
+    {id:'dashboard',label:'Dashboard',icon:'cpu'},
+    {id:'logs',label:'Device Logs',icon:'log'},
+    {id:'users',label:'Shared Access',icon:'users'},
+    {id:'settings',label:'Settings',icon:'settings'},
+  ];
+  return (
+    <div style={{width:collapsed?64:240,flexShrink:0,height:'100vh',background:t.surface,
+      borderRight:`1px solid ${t.border}`,display:'flex',flexDirection:'column',
+      transition:'width 0.25s',overflow:'hidden',position:'relative',zIndex:10}}>
+      <div style={{padding:collapsed?'20px 0':'20px',display:'flex',alignItems:'center',gap:12,
+        borderBottom:`1px solid ${t.border}`,justifyContent:collapsed?'center':'flex-start'}}>
+        <div style={{width:36,height:36,borderRadius:10,background:t.accent,flexShrink:0,
+          display:'flex',alignItems:'center',justifyContent:'center',boxShadow:`0 4px 12px ${t.accent}40`}}>
+          <Icon name="link" size={18} color="#fff"/>
+        </div>
+        {!collapsed&&<span style={{fontWeight:800,fontSize:16,color:t.text,whiteSpace:'nowrap'}}>NexaLink</span>}
+        <button onClick={()=>setCollapsed(p=>!p)} style={{
+          marginLeft:'auto',background:'none',border:'none',cursor:'pointer',color:t.textSub,padding:0,flexShrink:0
+        }}><Icon name={collapsed?'chevronRight':'chevronLeft'} size={16}/></button>
+      </div>
+      {!collapsed&&(
+        <div style={{margin:'14px 16px 0',background:t.surface2,borderRadius:t.radius,padding:'10px 14px'}}>
+          <div style={{fontSize:11,color:t.textMuted,fontWeight:600,marginBottom:4}}>DEVICES</div>
+          <div style={{display:'flex',alignItems:'center',gap:8}}>
+            <StatusDot status="online" size={7}/>
+            <span style={{fontSize:13,fontWeight:600,color:t.text}}>{onlineCount} online</span>
+            <span style={{fontSize:13,color:t.textMuted}}>/ {devices.length}</span>
+          </div>
+        </div>
+      )}
+      <nav style={{flex:1,padding:'12px 8px',display:'flex',flexDirection:'column',gap:2}}>
+        {nav.map(item=>(
+          <button key={item.id} onClick={()=>setPage(item.id)} style={{
+            display:'flex',alignItems:'center',gap:12,padding:collapsed?'10px 0':'10px 12px',
+            borderRadius:t.radius-2,border:'none',cursor:'pointer',width:'100%',
+            background:page===item.id?`${t.accent}15`:'transparent',
+            color:page===item.id?t.accent:t.textSub,
+            fontWeight:page===item.id?600:400,fontSize:14,transition:'all 0.15s',
+            fontFamily:'Plus Jakarta Sans,sans-serif',justifyContent:collapsed?'center':'flex-start'
+          }}>
+            <Icon name={item.icon} size={17} color={page===item.id?t.accent:t.textSub}/>
+            {!collapsed&&<span style={{whiteSpace:'nowrap'}}>{item.label}</span>}
+            {!collapsed&&page===item.id&&<span style={{marginLeft:'auto',width:6,height:6,borderRadius:'50%',background:t.accent}}/>}
+          </button>
+        ))}
+      </nav>
+      <div style={{padding:collapsed?'12px 8px':'12px 16px',borderTop:`1px solid ${t.border}`}}>
+        <button onClick={onLogout} style={{
+          display:'flex',alignItems:'center',gap:10,width:'100%',background:'none',
+          border:'none',cursor:'pointer',padding:collapsed?'8px 0':'8px 4px',
+          borderRadius:t.radius-2,justifyContent:collapsed?'center':'flex-start'
+        }}>
+          <div style={{width:32,height:32,borderRadius:'50%',background:`${t.accent}20`,
+            display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>
+            <span style={{fontSize:13,fontWeight:700,color:t.accent}}>{user.name[0].toUpperCase()}</span>
+          </div>
+          {!collapsed&&(
+            <div style={{textAlign:'left',overflow:'hidden'}}>
+              <div style={{fontSize:13,fontWeight:600,color:t.text,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{user.name}</div>
+              <div style={{fontSize:11,color:t.textMuted,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{user.email}</div>
+            </div>
+          )}
+        </button>
+      </div>
+    </div>
+  );
+};
+
+// ── ADD DEVICE MODAL ───────────────────────────────────────────────────────────
+const AddDeviceModal = ({ theme:t, onAdd, onClose }) => {
+  const [name,setName]=useState('');
+  const [type,setType]=useState('ESP32');
+  const [step,setStep]=useState(1);
+  const [loading,setLoading]=useState(false);
+  const topicId = useRef('d'+Math.random().toString(36).slice(2,7));
+
+  const handleAdd = () => {
+    if(!name)return;
+    setLoading(true);
+    setTimeout(()=>{ onAdd({name,type}); setLoading(false); },900);
+  };
+
+  const inp = { style:{
+    width:'100%',padding:'10px 13px',borderRadius:t.radius-2,
+    border:`1.5px solid ${t.border}`,background:t.surface2,
+    color:t.text,fontSize:13,fontFamily:'Plus Jakarta Sans,sans-serif',outline:'none'
+  }};
+
+  return (
+    <div onClick={onClose} style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.4)',display:'flex',
+      alignItems:'center',justifyContent:'center',zIndex:1000,backdropFilter:'blur(4px)'}}>
+      <div onClick={e=>e.stopPropagation()} style={{
+        background:t.surface,borderRadius:t.radius+4,padding:30,width:420,
+        border:`1px solid ${t.border}`,boxShadow:t.shadow,animation:'slideUp 0.3s ease'
+      }}>
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:22}}>
+          <div style={{fontSize:17,fontWeight:700,color:t.text}}>Add New Device</div>
+          <button onClick={onClose} style={{background:'none',border:'none',cursor:'pointer',color:t.textSub}}>
+            <Icon name="x" size={20}/>
+          </button>
+        </div>
+        {step===1&&(
+          <div style={{display:'flex',flexDirection:'column',gap:14}}>
+            <div>
+              <label style={{fontSize:11,fontWeight:600,color:t.textSub,display:'block',marginBottom:5}}>DEVICE NAME</label>
+              <input value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. Robot Arm" {...inp} autoFocus/>
+            </div>
+            <div>
+              <label style={{fontSize:11,fontWeight:600,color:t.textSub,display:'block',marginBottom:8}}>DEVICE TYPE</label>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+                {[{id:'ESP32',icon:'wifi',desc:'WiFi / MQTT direct'},{id:'HC-05',icon:'bluetooth',desc:'Via bridge client'}].map(dt=>(
+                  <button key={dt.id} onClick={()=>setType(dt.id)} style={{
+                    padding:'13px 12px',borderRadius:t.radius,border:`2px solid ${type===dt.id?t.accent:t.border}`,
+                    background:type===dt.id?`${t.accent}10`:t.surface2,cursor:'pointer',textAlign:'left',
+                    transition:'all 0.15s',fontFamily:'Plus Jakarta Sans,sans-serif'
+                  }}>
+                    <Icon name={dt.icon} size={18} color={type===dt.id?t.accent:t.textSub}/>
+                    <div style={{fontWeight:700,fontSize:13,color:type===dt.id?t.accent:t.text,marginTop:7}}>{dt.id}</div>
+                    <div style={{fontSize:11,color:t.textMuted,marginTop:2}}>{dt.desc}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+            <button onClick={()=>name&&setStep(2)} style={{
+              padding:'11px 0',borderRadius:t.radius-2,border:'none',
+              background:name?t.accent:t.surface2,color:name?'#fff':t.textMuted,
+              fontWeight:600,fontSize:14,cursor:name?'pointer':'default',
+              fontFamily:'Plus Jakarta Sans,sans-serif',marginTop:2
+            }}>Continue →</button>
+          </div>
+        )}
+        {step===2&&(
+          <div style={{display:'flex',flexDirection:'column',gap:14}}>
+            <div style={{background:t.surface2,borderRadius:t.radius,padding:16,border:`1px solid ${t.border}`}}>
+              <div style={{fontSize:11,fontWeight:600,color:t.textMuted,marginBottom:8}}>MQTT CREDENTIALS</div>
+              <div style={{fontFamily:'monospace',fontSize:12,color:t.textSub,lineHeight:2}}>
+                <div>Broker: <span style={{color:t.accent}}>broker.hivemq.com</span></div>
+                <div>Port WSS: <span style={{color:t.accent}}>8884</span></div>
+                <div>Topic: <span style={{color:t.accent}}>nexalink/device/{topicId.current}</span></div>
+              </div>
+            </div>
+            {type==='HC-05'&&(
+              <div style={{background:`${t.amber}15`,borderRadius:t.radius,padding:13,border:`1px solid ${t.amber}30`}}>
+                <div style={{fontSize:12,fontWeight:700,color:t.amber}}>Bridge Required</div>
+                <div style={{fontSize:12,color:t.textSub,marginTop:3}}>HC-05 needs a bridge client to forward Bluetooth → MQTT.</div>
+              </div>
+            )}
+            <button onClick={handleAdd} disabled={loading} style={{
+              padding:'11px 0',borderRadius:t.radius-2,border:'none',background:t.accent,
+              color:'#fff',fontWeight:600,fontSize:14,cursor:loading?'wait':'pointer',
+              fontFamily:'Plus Jakarta Sans,sans-serif',boxShadow:`0 4px 12px ${t.accent}40`
+            }}>{loading?'Registering…':'Register Device'}</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ── DEVICE CARD ────────────────────────────────────────────────────────────────
+const DeviceCard = ({ theme:t, device, onClick }) => (
+  <div onClick={onClick} style={{
+    background:t.surface,borderRadius:t.radius,padding:'19px 20px',
+    border:`1px solid ${t.border}`,cursor:'pointer',transition:'all 0.2s',
+    boxShadow:t.shadowSm,animation:'fadeIn 0.35s ease'
+  }}
+  onMouseEnter={e=>{e.currentTarget.style.transform='translateY(-2px)';e.currentTarget.style.boxShadow=t.shadow;}}
+  onMouseLeave={e=>{e.currentTarget.style.transform='';e.currentTarget.style.boxShadow=t.shadowSm;}}>
+    <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',marginBottom:12}}>
+      <div style={{width:38,height:38,borderRadius:11,background:`${t.accent}15`,display:'flex',alignItems:'center',justifyContent:'center'}}>
+        <Icon name={device.type==='ESP32'?'wifi':'bluetooth'} size={17} color={t.accent}/>
+      </div>
+      <div style={{display:'flex',alignItems:'center',gap:6,paddingTop:3}}>
+        <StatusDot status={device.status}/>
+        <span style={{fontSize:12,color:device.status==='online'?t.green:t.textMuted,fontWeight:500}}>{device.status}</span>
+      </div>
+    </div>
+    <div style={{fontWeight:700,fontSize:14,color:t.text,marginBottom:3}}>{device.name}</div>
+    <div style={{fontSize:12,color:t.textMuted,marginBottom:13}}>{device.type} · {device.lastSeen}</div>
+    <div style={{display:'flex',gap:7}}>
+      <span style={{fontSize:11,fontWeight:600,padding:'3px 10px',borderRadius:20,background:`${t.accent}15`,color:t.accent}}>{device.permission}</span>
+      {device.sharedWith.length>0&&<span style={{fontSize:11,padding:'3px 10px',borderRadius:20,background:t.surface2,color:t.textSub}}>+{device.sharedWith.length} shared</span>}
+    </div>
+  </div>
+);
+
+// ── DASHBOARD ──────────────────────────────────────────────────────────────────
+const Dashboard = ({ theme:t, devices, setDevices, onSelectDevice }) => {
+  const [showAdd,setShowAdd]=useState(false);
+  const [search,setSearch]=useState('');
+  const [filter,setFilter]=useState('all');
+
+  const filtered = devices.filter(d=>{
+    return d.name.toLowerCase().includes(search.toLowerCase()) && (filter==='all'||d.status===filter);
+  });
+  const online = devices.filter(d=>d.status==='online').length;
+
+  const handleAdd = ({name,type}) => {
+    setDevices(p=>[...p,{
+      id:'d'+Date.now(),name,type,status:'online',lastSeen:'Just now',
+      sharedWith:[],permission:'owner',firmware:type==='ESP32'?'v2.3.1':'v1.0.4',
+      temp:type==='ESP32'?22.0:null,humidity:type==='ESP32'?50:null,brightness:50,relay:false
+    }]);
+    setShowAdd(false);
+  };
+
+  return (
+    <div style={{flex:1,overflow:'auto',padding:'30px 34px'}}>
+      {showAdd&&<AddDeviceModal theme={t} onAdd={handleAdd} onClose={()=>setShowAdd(false)}/>}
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:26}}>
+        <div>
+          <h1 style={{fontSize:24,fontWeight:800,color:t.text,letterSpacing:'-0.5px'}}>Dashboard</h1>
+          <p style={{fontSize:13,color:t.textSub,marginTop:2}}>{online} of {devices.length} devices online</p>
+        </div>
+        <button onClick={()=>setShowAdd(true)} style={{
+          display:'flex',alignItems:'center',gap:7,padding:'10px 18px',borderRadius:t.radius,
+          border:'none',background:t.accent,color:'#fff',fontWeight:600,fontSize:13,
+          cursor:'pointer',fontFamily:'Plus Jakarta Sans,sans-serif',boxShadow:`0 4px 14px ${t.accent}40`
+        }}>
+          <Icon name="plus" size={15} color="#fff"/>Add Device
+        </button>
+      </div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:12,marginBottom:24}}>
+        {[
+          {label:'Online',val:online,icon:'activity',color:t.green},
+          {label:'Offline',val:devices.length-online,icon:'zap',color:t.red},
+          {label:'Shared',val:devices.filter(d=>d.sharedWith.length>0).length,icon:'users',color:t.accent},
+        ].map(s=>(
+          <div key={s.label} style={{background:t.surface,borderRadius:t.radius,padding:'16px 18px',border:`1px solid ${t.border}`,boxShadow:t.shadowSm}}>
+            <div style={{display:'flex',alignItems:'center',gap:7,marginBottom:8}}>
+              <div style={{width:30,height:30,borderRadius:9,background:`${s.color}15`,display:'flex',alignItems:'center',justifyContent:'center'}}>
+                <Icon name={s.icon} size={14} color={s.color}/>
+              </div>
+              <span style={{fontSize:12,color:t.textSub,fontWeight:600}}>{s.label}</span>
+            </div>
+            <div style={{fontSize:26,fontWeight:800,color:t.text}}>{s.val}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{display:'flex',gap:9,marginBottom:18}}>
+        <div style={{flex:1,position:'relative'}}>
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search devices…"
+            style={{width:'100%',padding:'9px 14px 9px 36px',borderRadius:t.radius,border:`1.5px solid ${t.border}`,
+              background:t.surface,color:t.text,fontSize:13,fontFamily:'Plus Jakarta Sans,sans-serif',outline:'none'}}/>
+          <div style={{position:'absolute',left:11,top:'50%',transform:'translateY(-50%)',color:t.textMuted}}>
+            <Icon name="activity" size={14}/>
+          </div>
+        </div>
+        {['all','online','offline'].map(f=>(
+          <button key={f} onClick={()=>setFilter(f)} style={{
+            padding:'9px 15px',borderRadius:t.radius,border:`1.5px solid ${filter===f?t.accent:t.border}`,
+            background:filter===f?`${t.accent}10`:t.surface,color:filter===f?t.accent:t.textSub,
+            fontWeight:filter===f?600:400,fontSize:12,cursor:'pointer',
+            fontFamily:'Plus Jakarta Sans,sans-serif',transition:'all 0.15s',textTransform:'capitalize'
+          }}>{f}</button>
+        ))}
+      </div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(220px,1fr))',gap:13}}>
+        {filtered.map(d=><DeviceCard key={d.id} theme={t} device={d} onClick={()=>onSelectDevice(d.id)}/>)}
+        {filtered.length===0&&(
+          <div style={{gridColumn:'1/-1',textAlign:'center',padding:60,color:t.textMuted}}>
+            <Icon name="cpu" size={30} color={t.textMuted} style={{marginBottom:10}}/>
+            <div style={{fontSize:13}}>No devices found</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ── DEVICE VIEW ────────────────────────────────────────────────────────────────
+const DeviceView = ({ theme:t, device, onUpdate, onBack }) => {
+  const mq = useMQTT();
+  const [conn, setConn] = useState({...DEFAULT_CONN, topic:`nexalink/device/${device.id}`});
+  const [cmds, setCmds] = useState(DEFAULT_ROBOT_CMDS);
+  const [manualCmd, setManualCmd] = useState('');
+  const [chartTemp] = useState(()=>genChart(device.temp||22,2));
+  const [chartHum] = useState(()=>genChart(device.humidity||55,5));
+  const [liveTemp, setLiveTemp] = useState(device.temp);
+  const [liveHum, setLiveHum] = useState(device.humidity);
+  const isOnline = device.status === 'online';
+
+  useEffect(()=>{
+    if(!isOnline)return;
+    const iv=setInterval(()=>{
+      setLiveTemp(p=>p!==null?+(p+(Math.random()-0.5)*0.3).toFixed(1):null);
+      setLiveHum(p=>p!==null?Math.max(20,Math.min(95,+(p+(Math.random()-0.5)*0.8).toFixed(0))):null);
+    },2500);
+    return ()=>clearInterval(iv);
+  },[isOnline]);
+
+  const sendManual = () => {
+    if(!manualCmd.trim())return;
+    mq.publish(conn.topic+'/control', manualCmd);
+    setManualCmd('');
+  };
+
+  return (
+    <div style={{flex:1,overflow:'auto',padding:'30px 34px'}}>
+      {/* Header */}
+      <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:24}}>
+        <button onClick={onBack} style={{width:36,height:36,borderRadius:t.radius,border:`1px solid ${t.border}`,
+          background:t.surface,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',color:t.textSub,flexShrink:0}}>
+          <Icon name="chevronLeft" size={18}/>
+        </button>
+        <div style={{flex:1}}>
+          <div style={{display:'flex',alignItems:'center',gap:9}}>
+            <h1 style={{fontSize:20,fontWeight:800,color:t.text,letterSpacing:'-0.4px'}}>{device.name}</h1>
+            <StatusDot status={device.status} size={8}/>
+          </div>
+          <div style={{fontSize:12,color:t.textSub,marginTop:1}}>{device.type} · fw {device.firmware}</div>
+        </div>
+        <div style={{display:'flex',alignItems:'center',gap:8}}>
+          <StatusDot status={mq.connState} size={9}/>
+          <span style={{fontSize:12,fontWeight:600,color:
+            {connected:t.green,connecting:t.amber,error:t.red,disconnected:t.textMuted}[mq.connState]}}>
+            MQTT: {mq.connState}
+          </span>
+        </div>
+      </div>
+
+      {!isOnline&&(
+        <div style={{background:`${t.red}12`,border:`1px solid ${t.red}30`,borderRadius:t.radius,
+          padding:'13px 17px',marginBottom:18,display:'flex',alignItems:'center',gap:10}}>
+          <Icon name="zap" size={15} color={t.red}/>
+          <span style={{fontSize:13,color:t.red,fontWeight:500}}>Device offline · Last seen {device.lastSeen} · Controls disabled</span>
+        </div>
+      )}
+
+      {/* Connection panel */}
+      <ConnectionPanel theme={t} mqtt={mq} conn={conn} setConn={setConn}/>
+
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
+        {/* Robot control - full width */}
+        <div style={{gridColumn:'1/-1'}}>
+          <RobotControlPanel theme={t} mqtt={mq} conn={conn} cmds={cmds} setCmds={setCmds}/>
+        </div>
+
+        {/* Temp */}
+        {liveTemp!==null&&(
+          <div style={{background:t.surface,borderRadius:t.radius,padding:20,border:`1px solid ${t.border}`,boxShadow:t.shadowSm}}>
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:4}}>
+              <div style={{display:'flex',alignItems:'center',gap:7,color:t.textSub}}>
+                <Icon name="thermometer" size={13}/>
+                <span style={{fontSize:11,fontWeight:600}}>TEMPERATURE</span>
+              </div>
+              {isOnline&&<div style={{width:6,height:6,borderRadius:'50%',background:t.green,animation:'pulse 2s infinite'}}/>}
+            </div>
+            <div style={{fontSize:34,fontWeight:800,color:t.text,letterSpacing:'-1px',margin:'8px 0'}}>{liveTemp}°C</div>
+            <MiniChart data={chartTemp} color={t.accent} height={50} label="temp"/>
+          </div>
+        )}
+
+        {/* Humidity */}
+        {liveHum!==null&&(
+          <div style={{background:t.surface,borderRadius:t.radius,padding:20,border:`1px solid ${t.border}`,boxShadow:t.shadowSm}}>
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:4}}>
+              <div style={{display:'flex',alignItems:'center',gap:7,color:t.textSub}}>
+                <Icon name="droplets" size={13}/>
+                <span style={{fontSize:11,fontWeight:600}}>HUMIDITY</span>
+              </div>
+              {isOnline&&<div style={{width:6,height:6,borderRadius:'50%',background:t.green,animation:'pulse 2s infinite'}}/>}
+            </div>
+            <div style={{fontSize:34,fontWeight:800,color:t.text,letterSpacing:'-1px',margin:'8px 0'}}>{liveHum}%</div>
+            <MiniChart data={chartHum} color='#22c55e' height={50} label="hum"/>
+          </div>
+        )}
+
+        {/* Controls */}
+        <div style={{background:t.surface,borderRadius:t.radius,padding:20,border:`1px solid ${t.border}`,boxShadow:t.shadowSm}}>
+          <div style={{fontSize:11,fontWeight:600,color:t.textSub,marginBottom:16}}>DEVICE CONTROLS</div>
+          <div style={{display:'flex',flexDirection:'column',gap:16}}>
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+              <div>
+                <div style={{fontSize:13,fontWeight:600,color:t.text}}>Main Relay</div>
+                <div style={{fontSize:11,color:t.textMuted,fontFamily:'monospace'}}>{conn.topic}/relay</div>
+              </div>
+              <Toggle checked={device.relay} accent={t.accent} disabled={!isOnline||device.permission==='viewer'}
+                onChange={v=>{onUpdate({relay:v});mq.publish(conn.topic+'/relay',v?'1':'0');}}/>
+            </div>
+            <div>
+              <div style={{display:'flex',justifyContent:'space-between',marginBottom:8}}>
+                <div>
+                  <div style={{fontSize:13,fontWeight:600,color:t.text}}>Brightness</div>
+                  <div style={{fontSize:11,color:t.textMuted,fontFamily:'monospace'}}>{conn.topic}/brightness</div>
+                </div>
+                <span style={{fontSize:13,fontWeight:700,color:t.accent}}>{device.brightness}%</span>
+              </div>
+              <div style={{position:'relative',height:5,background:t.surface2,borderRadius:10}}>
+                <div style={{position:'absolute',left:0,top:0,bottom:0,width:`${device.brightness}%`,background:t.accent,borderRadius:10,transition:'width 0.1s'}}/>
+                <input type="range" min={0} max={100} value={device.brightness}
+                  disabled={!isOnline||device.permission==='viewer'}
+                  onChange={e=>{onUpdate({brightness:+e.target.value});mq.publish(conn.topic+'/brightness',e.target.value);}}
+                  style={{position:'absolute',inset:0,opacity:0,cursor:(isOnline&&device.permission!=='viewer')?'pointer':'not-allowed',width:'100%',height:'100%'}}/>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Manual command */}
+        <div style={{background:t.surface,borderRadius:t.radius,padding:20,border:`1px solid ${t.border}`,boxShadow:t.shadowSm}}>
+          <div style={{fontSize:11,fontWeight:600,color:t.textSub,marginBottom:14}}>SEND COMMAND</div>
+          <div style={{display:'flex',gap:7,marginBottom:12}}>
+            <input value={manualCmd} onChange={e=>setManualCmd(e.target.value)}
+              onKeyDown={e=>e.key==='Enter'&&sendManual()}
+              placeholder={mq.connState==='connected'?'Any payload…':'Connect MQTT first'}
+              disabled={mq.connState!=='connected'}
+              style={{flex:1,padding:'9px 13px',borderRadius:t.radius-4,border:`1.5px solid ${t.border}`,
+                background:t.surface2,color:t.text,fontSize:13,fontFamily:'monospace',outline:'none',
+                opacity:mq.connState==='connected'?1:0.5}}/>
+            <button onClick={sendManual} disabled={mq.connState!=='connected'||!manualCmd} style={{
+              padding:'9px 13px',borderRadius:t.radius-4,border:'none',
+              background:(mq.connState==='connected'&&manualCmd)?t.accent:t.surface2,
+              color:(mq.connState==='connected'&&manualCmd)?'#fff':t.textMuted,
+              cursor:(mq.connState==='connected'&&manualCmd)?'pointer':'default',transition:'all 0.15s'
+            }}>
+              <Icon name="send" size={15} color={(mq.connState==='connected'&&manualCmd)?'#fff':t.textMuted}/>
+            </button>
+          </div>
+          <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
+            {['REBOOT','STATUS','RESET','PING'].map(qc=>(
+              <button key={qc} onClick={()=>mq.publish(conn.topic+'/control',qc)}
+                disabled={mq.connState!=='connected'}
+                style={{padding:'4px 11px',borderRadius:20,border:`1px solid ${t.border}`,background:'none',
+                  color:t.textSub,fontSize:11,fontWeight:600,cursor:mq.connState==='connected'?'pointer':'default',
+                  fontFamily:'Plus Jakarta Sans,sans-serif',opacity:mq.connState==='connected'?1:0.4}}>
+                {qc}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* MQTT Log - full width */}
+        <div style={{gridColumn:'1/-1'}}>
+          <MQTTLog theme={t} messages={mq.messages}/>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ── APP SHELL ──────────────────────────────────────────────────────────────────
+const AppShell = ({ theme:t, user, onLogout, tweaks, setTweaks }) => {
+  const [page,setPage]=useState('dashboard');
+  const [devices,setDevices]=useState(INITIAL_DEVICES);
+  const [selectedId,setSelectedId]=useState(null);
+  const [collapsed,setCollapsed]=useState(false);
+
+  const selected = devices.find(d=>d.id===selectedId);
+  const updateDevice = (id,u) => setDevices(p=>p.map(d=>d.id===id?{...d,...u}:d));
+
+  return (
+    <div style={{display:'flex',height:'100vh',background:t.bg,overflow:'hidden'}}>
+      <Sidebar theme={t} user={user} page={page}
+        setPage={p=>{setPage(p);setSelectedId(null);}}
+        devices={devices} onLogout={onLogout}
+        collapsed={collapsed} setCollapsed={setCollapsed}/>
+      <div style={{flex:1,display:'flex',flexDirection:'column',minWidth:0}}>
+        {/* Topbar */}
+        <div style={{height:54,borderBottom:`1px solid ${t.border}`,background:t.surface,
+          display:'flex',alignItems:'center',justifyContent:'flex-end',padding:'0 26px',gap:10,flexShrink:0}}>
+          <button onClick={()=>setTweaks(p=>({...p,darkMode:!p.darkMode}))} style={{
+            width:33,height:33,borderRadius:9,border:`1px solid ${t.border}`,
+            background:t.surface2,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',color:t.textSub
+          }}><Icon name={t.dark?'sun':'moon'} size={14}/></button>
+          <button style={{width:33,height:33,borderRadius:9,border:`1px solid ${t.border}`,
+            background:t.surface2,display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',color:t.textSub,position:'relative'}}>
+            <Icon name="bell" size={14}/>
+            <span style={{position:'absolute',top:6,right:6,width:6,height:6,borderRadius:'50%',background:t.accent,border:`2px solid ${t.surface}`}}/>
+          </button>
+        </div>
+        {/* Content */}
+        {page==='dashboard'&&<Dashboard theme={t} devices={devices} setDevices={setDevices} onSelectDevice={id=>{setSelectedId(id);setPage('device');}}/>}
+        {page==='device'&&selected&&<DeviceView theme={t} device={selected} onUpdate={u=>updateDevice(selectedId,u)} onBack={()=>{setSelectedId(null);setPage('dashboard');}}/>}
+        {page==='logs'&&<div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',color:t.textMuted,gap:12}}><Icon name="log" size={36} color={t.textMuted}/><div style={{fontSize:16,fontWeight:700,color:t.textSub}}>Device Logs</div><div style={{fontSize:13}}>Coming soon</div></div>}
+        {page==='users'&&<div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',color:t.textMuted,gap:12}}><Icon name="users" size={36} color={t.textMuted}/><div style={{fontSize:16,fontWeight:700,color:t.textSub}}>Shared Access</div><div style={{fontSize:13}}>Coming soon</div></div>}
+        {page==='settings'&&<div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',color:t.textMuted,gap:12}}><Icon name="settings" size={36} color={t.textMuted}/><div style={{fontSize:16,fontWeight:700,color:t.textSub}}>Settings</div><div style={{fontSize:13}}>Coming soon</div></div>}
+      </div>
+      <TweaksPanel>
+        <TweakSection label="Appearance">
+          <TweakToggle label="Dark Mode" value={tweaks.darkMode} onChange={v=>setTweaks(p=>({...p,darkMode:v}))}/>
+          <TweakColor label="Accent Color" value={tweaks.accent} onChange={v=>setTweaks(p=>({...p,accent:v}))}/>
+          <TweakSlider label="Border Radius" value={tweaks.radius} min={4} max={24} step={2} onChange={v=>setTweaks(p=>({...p,radius:v}))}/>
+        </TweakSection>
+      </TweaksPanel>
+    </div>
+  );
+};
+
+// ── ROOT ───────────────────────────────────────────────────────────────────────
+const App = () => {
+  const defaults = (() => { try{return JSON.parse(document.getElementById('__tweak_defaults').textContent);}catch{return{};} })();
+  const [tweaks,setTweaks] = useState(defaults);
+  const theme = makeTheme(tweaks.darkMode, tweaks.accent, tweaks.radius);
+  const [user,setUser] = useState(null);
+
+  useEffect(()=>{
+    window.parent.postMessage({type:'__edit_mode_set_keys',edits:tweaks},'*');
+    const el=document.getElementById('__tweak_defaults');
+    if(el) el.textContent=JSON.stringify(tweaks,null,2);
+  },[tweaks]);
+
+  if(!user) return <AuthScreen theme={theme} onLogin={setUser}/>;
+  return <AppShell theme={theme} user={user} onLogout={()=>setUser(null)} tweaks={tweaks} setTweaks={setTweaks}/>;
+};
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
